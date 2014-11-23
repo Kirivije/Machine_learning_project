@@ -1,0 +1,149 @@
+---
+title: "Prediction of exercise type using sensor data"
+output: html_document
+---
+###Objective
+
+Six individuals have performed ten repetition of the Unilateral Dumbbell Biceps Curl in five different ways:
+
+1. Exactly according to the specification (Class A)
+
+2. Throwing the elbows to the front (Class B)
+
+3. Lifting the dumbbell only halfway (Class C)
+
+4. Lowering the dumbbell only halfway (Class D) 
+
+5. Throwing the hips to the front (Class E)
+
+Each individual has worn senors to monitor different parameters like angle, speed etc. (Original results are described in the following website:  
+http://groupware.les.inf.puc-rio.br/har). Main of objective is to use these data to predict the type of exercise different individual performed. 
+
+Here I will be using Random Forest approach to make a machine learning model and then do the predictions. 
+
+####1. Loading data and necessary libraries
+The training data (downloaded from: https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv:  
+```{r, cache=TRUE}
+pml_training <- read.csv(file="pml-training.csv",head=TRUE,sep=",")
+```
+
+The testing data (downloaded from: https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv:  
+
+```{r, cache=TRUE}
+pml.testing <- read.csv(file="pml-testing.csv",head=TRUE,sep=",")
+```
+
+```{r}
+library(caret)
+library(ggplot2)
+library(randomForest)
+```
+
+####2. Data preprocessing and cleanning 
+
+There are several variables that are exclusively "NA"s.These need to be removed as this will cause problem for model building and will not add any new information. In addition, a few mostly empty columns that are probably useful for the model. However, these can be exuded, at least for initial models, and can be included if necessary. In addition, time stamps, idividual names and row names were also excluded as they are not useful for predictions based on our objective. 
+
+```{r, cache=TRUE}
+
+pml_training_NArm <- pml_training[,apply(pml_training, 2, function(x) !any(is.na(x)))] #remove NAs
+
+pml_trainging_nzr <- nearZeroVar(pml_training_NArm)#remove near zero columns 
+filtered_pml_training <- pml_training_NArm[, -pml_trainging_nzr]#subset training dataset to remove near zero columns
+filtered_pml_training <- filtered_pml_training[!colnames(filtered_pml_training) %in% c("X", "raw_timestamp_part_1", "raw_timestamp_part_2", "cvtd_timestamp", "user_name")] # remove time stamp and rownames 
+
+```
+
+After doing these steps, there are 53 columns (excluding the ```classe``` variable) left for subsequent steps.
+```{r}
+dim(filtered_pml_training)
+```
+
+####3.Data partition 
+
+The cleaned data set is divided into two sets: training and testing. training set will have 80% of the data and will be used to train the model. 
+The testing data will be used to assess the model. 
+
+```{r, cache=TRUE}
+pml_train_index <- createDataPartition(filtered_pml_training$classe, p = .8,
+                                  list = FALSE,
+                                  times = 1)
+pml_train <- filtered_pml_training[pml_train_index, ] # training set
+pml_test <-  filtered_pml_training[-pml_train_index, ] # test set
+```
+
+####4.Model building 
+First, we can find the optimal number of variable to split at each node using ```tunerf``` function.
+
+```{r, cache=TRUE}
+set.seed(415)
+tunned_RF <- tuneRF(subset(pml_train, select = -classe), pml_train$classe, ntreeTry=100, 
+                    stepFactor=1.5,improve=0.01, trace=TRUE, plot=TRUE, dobest=FALSE)
+```
+
+Here is the optimal number of ```mtry``` is 15 and will use this information to build the model.
+
+```{r, cache=TRUE}
+set.seed(200)
+fit_model <- randomForest(classe ~., data=pml_train, mtry=15, ntree=1001, 
+                          keep.forest=TRUE, importance=TRUE,test=pml_test)
+```
+
+####5. Cross validation and out of the sample error
+Here, cross validation function can be used to see to see over fitting. It build multiple models using different number of predictors.  
+
+```{r, cache=TRUE}
+set.seed(647)
+cv_fit <- rfcv(subset(pml_train, select = -classe), pml_train$classe, cv.fold =3)
+with(cv_fit, plot(n.var, error.cv, log="x", type="o", lwd=2))
+```
+
+Y axis is the cross-validation error of each of the models and x axis is the number of predictors. When the number of predictors are small the error increased, but the difference between 53 predictor model and 3 predictor model is low. This suggests that there is little difference between the 3 predictor model and the 53 predictor model.
+
+Confusion matrix indicate that classification error is very small. 
+
+```{r}
+fit_model$confusion
+```
+
+Following are the sensitivity, specificity, and OOB error of the model. OOB error is taking each observation and only testing it on the trees on which it was not used ("out of bag"). Therefore, the OOB predicts a subset of the trees in the forest (roughly 2/3 in general). Here OOB is very small,indicating the model performed well.
+
+
+```{r}
+
+(fit_model$confusion[2,2]/(fit_model$confusion[2,2]+fit_model$confusion[2,1]))*100
+(fit_model$confusion[1,1]/(fit_model$confusion[1,1]+fit_model$confusion[1,2]))*100
+fit_model$err.rate[length(fit_model$err.rate[,1]),1]*100 #OOB error 
+
+```
+
+This plot gives indication of how important the variables were in classifying different type exercise. 
+
+```{r}
+varImpPlot(fit_model)
+
+```
+
+####6. Testing using test data
+Here we can test our model using the data that we set aside during data partition. Here instead of OOB, we can test our model on a real data-set. 
+The data below suggested that there is very little misclassification and our model overall work well.
+
+```{r, cache=TRUE}
+Prediction_RF <- predict(fit_model, newdata=pml_test)
+predict_comp <- data.frame(Original=pml_test$classe, Prediction=Prediction_RF)
+table(predict_comp)
+predict_comp$Comparison <- predict_comp$Original == predict_comp$Prediction
+ggplot(data=data.frame(table(predict_comp$Comparison, predict_comp$Original)), aes(x=Var2, y=Freq, fill = Var1)) + geom_bar(stat="identity") + ggtitle("Prediction") + ylab("Prediction Frequency") + xlab("Excercise class")
+
+```
+
+####7. Applying the machine learning algorithm to the 20 test cases
+```{r}
+pml_test_NArm <- pml.testing[ , apply(pml.testing, 2, function(x) !any(is.na(x)))]
+training_colnames <- colnames(pml_train)
+pml_test_final <- pml.testing[, (colnames(pml.testing) %in% training_colnames)]
+Prediction_final <- predict(fit_model, newdata=pml_test_final)
+data.frame(Prediction_final)
+```
+
+
+
